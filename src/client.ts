@@ -1,114 +1,74 @@
-// src/client.ts
+import { TinfoilAI } from '../../src';
+import { config } from 'dotenv';
 
-import { performance } from 'perf_hooks';
-import './wasm-exec.js';
+config();
+process.env.TINFOIL_ENCLAVE = process.env.TINFOIL_ENCLAVE || "llama3-3-70b.model.tinfoil.sh";
+process.env.TINFOIL_REPO = process.env.TINFOIL_REPO || "tinfoilsh/confidential-llama3-3-70b";
 
-// Use native fetch if present, otherwise fall back to node-fetch so Jest can mock it.
-const fetchFn: typeof fetch =
-  typeof globalThis.fetch === 'function'
-    ? globalThis.fetch.bind(globalThis)
-    : require('node-fetch').default;
+async function runStreamingExample(client: TinfoilAI) {
+    const messages = [
+        { role: 'system' as const, content: 'You are a helpful assistant.' },
+        { role: 'user' as const, content: 'Tell me a short story about aluminum foil.' }
+    ];
 
-export interface GroundTruth {
-  publicKeyFP: string;
-  measurement: string;
-}
+    console.log('\nPrompts:');
+    messages.forEach(msg => {
+        console.log(`${msg.role.toUpperCase()}: ${msg.content}`);
+    });
 
-export class SecureClient {
-  private enclave: string;
-  private repo: string;
-  private static goInstance: any = null;
-  private static initPromise: Promise<void> | null = null;
+    try {
+        console.log('Creating chat completion stream...');
+        const stream = await client.chat.completions.create({
+            model: 'llama3-3-70b',
+            messages: messages,
+            stream: true,
+        });
 
-  constructor(enclave: string, repo: string) {
-    this.enclave = enclave;
-    this.repo = repo;
-  }
+        console.log('\nStreaming response:');
+        let fullResponse = '';
 
-  // only kicks off once, on first verify()
-  public static async initializeWasm(): Promise<void> {
-    if (SecureClient.initPromise) {
-      return SecureClient.initPromise;
-    }
-    SecureClient.initPromise = (async () => {
-      SecureClient.goInstance = new (globalThis as any).Go();
-
-      const resp = await fetchFn(
-        'https://tinfoilsh.github.io/verifier-js/tinfoil-verifier.wasm'
-      );
-      if (!resp.ok) {
-        throw new Error(`Failed to fetch WASM: ${resp.status}`);
-      }
-      const bytes = await resp.arrayBuffer();
-      const { instance } = await WebAssembly.instantiate(
-        bytes,
-        SecureClient.goInstance.importObject
-      );
-      // Note: run() never resolves, and that’s fine
-      SecureClient.goInstance.run(instance);
-
-      // wait up to ~1s for the Go exports to appear
-      for (let i = 0; i < 10; i++) {
-        await new Promise((r) => setTimeout(r, 100));
-        if (
-          typeof (globalThis as any).verifyCode === 'function' &&
-          typeof (globalThis as any).verifyEnclave === 'function'
-        ) {
-          return;
+        for await (const chunk of stream) {
+            const content = chunk.choices[0]?.delta?.content || '';
+            fullResponse += content;
+            process.stdout.write(content);
         }
-      }
-      throw new Error('WASM exports not ready');
-    })();
-    return SecureClient.initPromise;
-  }
 
-  public async verify(): Promise<GroundTruth> {
-    await SecureClient.initializeWasm();
-
-    // sanity check
-    if (
-      typeof (globalThis as any).verifyCode !== 'function' ||
-      typeof (globalThis as any).verifyEnclave !== 'function'
-    ) {
-      throw new Error('WASM functions not available');
+        console.log('\n\nFull accumulated response:');
+        console.log(fullResponse);
+    } catch (error) {
+        console.error('Stream error:', error);
+        if (error instanceof Error) {
+            console.error('Full error stack:', error.stack);
+        }
+        // Log any additional error properties
+        console.error('Error details:', JSON.stringify(error, null, 2));
     }
-
-    // fetch the latest release notes
-    const releaseRes = await fetchFn(
-      `https://api.github.com/repos/${this.repo}/releases/latest`,
-      {
-        headers: {
-          Accept: 'application/vnd.github.v3+json',
-          'User-Agent': 'tinfoil-node-client',
-        },
-      }
-    );
-    if (!releaseRes.ok) {
-      throw new Error(
-        `GitHub API error: ${releaseRes.status} ${releaseRes.statusText}`
-      );
-    }
-    const releaseData = await releaseRes.json();
-    const eifMatch = releaseData.body?.match(/EIF hash: ([a-f0-9]{64})/i);
-    const digMatch = releaseData.body?.match(/Digest: `([a-f0-9]{64})`/);
-    const digest = eifMatch?.[1] || digMatch?.[1];
-    if (!digest) {
-      throw new Error('Digest not found in release notes');
-    }
-
-    // call into the WASM exports
-    const [measurement, attestation] = await Promise.all([
-      (globalThis as any).verifyCode(this.repo, digest),
-      (globalThis as any).verifyEnclave(this.enclave),
-    ]);
-
-    if (measurement !== attestation.measurement) {
-      throw new Error('Measurement mismatch');
-    }
-
-    return {
-      publicKeyFP: attestation.certificate,
-      measurement: attestation.measurement,
-    };
-  }
 }
+
+async function main() {
+    try {
+        console.log('Environment configuration:');
+        console.log('TINFOIL_ENCLAVE:', process.env.TINFOIL_ENCLAVE);
+        console.log('TINFOIL_REPO:', process.env.TINFOIL_REPO);
+
+        // Create a new TinfoilAI
+        const client = new TinfoilAI({
+            apiKey: 'tinfoil' // Replace with your actual API key
+        });
+
+        // Run streaming example
+        await runStreamingExample(client);
+    } catch (error) {
+        console.error('Main error:', error);
+        if (error instanceof Error) {
+            console.error('Main error stack:', error.stack);
+        }
+        throw error;
+    }
+}
+
+// Run the example
+main().catch(error => {
+    console.error('Top level error:', error);
+    process.exit(1);
+});
