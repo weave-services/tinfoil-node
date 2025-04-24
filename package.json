@@ -1,5 +1,5 @@
 {
-  "name": "tinfoil",
+  "name": "tinfoils",
   "version": "0.3.1",
   "description": "Official Tinfoil secure OpenAI client wrapper",
   "main": "dist/index.js",
